@@ -129,22 +129,21 @@ def generate_suppression_list(df):
     
     # Process each entity to find suppression candidates
     for entity_id, entity_cases in cases_df.groupby('alert_entity_id'):
-        # Filter out Open cases and sort by closed_at date (most recent first)
-        closed_cases = entity_cases[entity_cases['status'] != 'Open'].dropna(subset=['closed_at'])
-        closed_cases = closed_cases.sort_values('closed_at', ascending=False).reset_index(drop=True)
+        # Filter for only Closed FP cases with closure_reason='manual_investigation'
+        closed_fp_cases = entity_cases[(entity_cases['status'] == 'Closed FP') & 
+                                     (entity_cases['closure_reason'] == 'manual_investigation')].dropna(subset=['closed_at'])
+        closed_fp_cases = closed_fp_cases.sort_values('closed_at', ascending=False).reset_index(drop=True)
         
         # IMPORTANT: Filter for cases with closure_reason='manual_investigation'
         manual_investigation_cases = closed_cases[closed_cases['closure_reason'] == 'manual_investigation']
         
-        # Check if we have at least 2 closed cases with manual_investigation
-        if len(manual_investigation_cases) >= 2:
-            # Check if the latest 2 cases are both 'Closed FP' and have different closed_at dates
-            if (manual_investigation_cases.iloc[0]['status'] == 'Closed FP' and 
-                manual_investigation_cases.iloc[1]['status'] == 'Closed FP' and 
-                manual_investigation_cases.iloc[0]['closed_at'] != manual_investigation_cases.iloc[1]['closed_at']):
+        # IMPORTANT: Now we check if we have at least 2 Closed FP cases with manual_investigation
+        if len(closed_fp_cases) >= 2:
+            # Check if the latest 2 cases have different closed_at dates
+            if closed_fp_cases.iloc[0]['closed_at'] != closed_fp_cases.iloc[1]['closed_at']:
                 
                 # Determine suppression period
-                suppression_start = manual_investigation_cases.iloc[0]['closed_at']
+                suppression_start = closed_fp_cases.iloc[0]['closed_at']
                 suppression_end = suppression_start + timedelta(days=60)
                 
                 # Record suppression details for this alert_entity_id
@@ -152,10 +151,10 @@ def generate_suppression_list(df):
                     'alert_entity_id': [entity_id],
                     'suppression_start': [suppression_start],
                     'suppression_end': [suppression_end],
-                    'trigger_case_1': [manual_investigation_cases.iloc[0]['case_id']],
-                    'trigger_case_1_closed_at': [manual_investigation_cases.iloc[0]['closed_at']],
-                    'trigger_case_2': [manual_investigation_cases.iloc[1]['case_id']],
-                    'trigger_case_2_closed_at': [manual_investigation_cases.iloc[1]['closed_at']]
+                    'trigger_case_1': [closed_fp_cases.iloc[0]['case_id']],
+                    'trigger_case_1_closed_at': [closed_fp_cases.iloc[0]['closed_at']],
+                    'trigger_case_2': [closed_fp_cases.iloc[1]['case_id']],
+                    'trigger_case_2_closed_at': [closed_fp_cases.iloc[1]['closed_at']]
                 })
                 suppression_periods = pd.concat([suppression_periods, period], ignore_index=True)
                 
@@ -300,7 +299,10 @@ def export_report_to_csv(report, output_dir='./'):
     
     # Export validation issues
     validation_file = os.path.join(output_dir, f'validation_issues_{timestamp}.csv')
-    pd.DataFrame(report['details']['validation_issues'], columns=['issue']).to_csv(validation_file, index=False)
+    if validation_issues:
+        pd.DataFrame({'issue': report['details']['validation_issues']}).to_csv(validation_file, index=False)
+    else:
+        pd.DataFrame({'issue': ['No validation issues found']}).to_csv(validation_file, index=False)
     
     # Export summary as a simple CSV
     summary_file = os.path.join(output_dir, f'suppression_summary_{timestamp}.csv')
