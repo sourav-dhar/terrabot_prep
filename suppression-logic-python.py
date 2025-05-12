@@ -81,9 +81,8 @@ def generate_suppression_list(df):
         # Get the case status (using the most prevalent status in the case)
         status = case_group['status'].value_counts().index[0]
         
-        # Check if case has mixed statuses and track this
-        if len(case_group['status'].unique()) > 1:
-            validation_issues.append(f"Case {case_id} has mixed statuses: {dict(case_group['status'].value_counts())}")
+        # Note: Multiple alerts in a case may have different statuses
+        # This is normal behavior, not an issue to track
         
         # Get the most prevalent closure_reason
         closure_reason = None
@@ -733,9 +732,11 @@ if __name__ == "__main__":
         {'alert_entity_id': 'KS9876543', 'case_id': 'C006', 'alert_id': 'A010', 'status': 'Closed FP', 'created_at': '2023-01-20', 'closed_at': '2023-01-30', 'closure_reason': 'Self Transfers', 'rule_name': 'one_to_many'},
         {'alert_entity_id': 'KS9876543', 'case_id': 'C007', 'alert_id': 'A011', 'status': 'Open', 'created_at': '2023-02-10', 'closed_at': None, 'closure_reason': None, 'rule_name': 'high_value'},
         
-        # Edge case: mixed status in case
+        # Multiple consecutive "Closed FP" cases with manual_investigation
         {'alert_entity_id': 'KS1234567', 'case_id': 'C008', 'alert_id': 'A012', 'status': 'Closed FP', 'created_at': '2023-01-05', 'closed_at': '2023-01-15', 'closure_reason': 'manual_investigation', 'rule_name': 'structuring'},
-        {'alert_entity_id': 'KS1234567', 'case_id': 'C008', 'alert_id': 'A013', 'status': 'Open', 'created_at': '2023-01-05', 'closed_at': None, 'closure_reason': None, 'rule_name': 'structuring'},
+        {'alert_entity_id': 'KS1234567', 'case_id': 'C008', 'alert_id': 'A013', 'status': 'Closed FP', 'created_at': '2023-01-05', 'closed_at': '2023-01-15', 'closure_reason': 'manual_investigation', 'rule_name': 'structuring'},
+        {'alert_entity_id': 'KS1234567', 'case_id': 'C009', 'alert_id': 'A014', 'status': 'Closed FP', 'created_at': '2023-01-20', 'closed_at': '2023-01-25', 'closure_reason': 'manual_investigation', 'rule_name': 'structuring'},
+        {'alert_entity_id': 'KS1234567', 'case_id': 'C010', 'alert_id': 'A015', 'status': 'Open', 'created_at': '2023-01-30', 'closed_at': None, 'closure_reason': None, 'rule_name': 'structuring'},
         
         # Edge case: same closed date
         {'alert_entity_id': 'KS7654321', 'case_id': 'C009', 'alert_id': 'A014', 'status': 'Closed FP', 'created_at': '2023-01-05', 'closed_at': '2023-01-15', 'closure_reason': 'manual_investigation', 'rule_name': 'rapid_movement'},
