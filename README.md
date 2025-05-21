@@ -1,61 +1,3 @@
-# Import necessary libraries
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from datetime import datetime, timedelta
-import os
-from sklearn.metrics import roc_curve
-
-# Set visualization style
-plt.style.use('ggplot')
-sns.set(style="whitegrid")
-
-# Create output directory for visualizations
-os.makedirs('rule_threshold_visualizations', exist_ok=True)
-
-# Load and prepare the data
-def load_and_prepare_data():
-    """Load all data from Excel file and join rule information with transaction data"""
-    
-    # Read transaction data
-    transaction_data = pd.read_excel('transaction_dummy_data_10k_final.xlsx', 
-                                     sheet_name='transaction_dummy_data_10k')
-    
-    # Read rule descriptions
-    rule_descriptions = pd.read_excel('transaction_dummy_data_10k_final.xlsx', 
-                                     sheet_name='rule_description')
-    
-    # Convert dates to datetime if not already
-    date_columns = ['transaction_date_time_local', 'created_at', 'closed_at', 
-                    'kyc_sender_create_date', 'kyc_receiver_create_date',
-                    'dob_sender', 'dob_receiver', 'self_closure_date']
-    
-    for col in date_columns:
-        if col in transaction_data.columns:
-            transaction_data[col] = pd.to_datetime(transaction_data[col])
-    
-    # Clean up the rule descriptions and thresholds
-    rule_descriptions['threshold_numeric'] = rule_descriptions['Current threshold'].apply(
-        lambda x: float(str(x).replace('>', '').replace('=', '').strip()) 
-                  if isinstance(x, (str, int, float)) and str(x).replace('>', '').replace('=', '').strip().replace('.', '', 1).isdigit() 
-                  else np.nan
-    )
-    
-    # Join transaction data with rule descriptions
-    merged_data = transaction_data.merge(
-        rule_descriptions[['Rule no.', 'Rule description', 'Current threshold', 'threshold_numeric', 'Rule Pattern']], 
-        left_on='alert_rules', 
-        right_on='Rule no.', 
-        how='left'
-    )
-    
-    print(f"Loaded {len(transaction_data)} transactions and {len(rule_descriptions)} rule descriptions")
-    print(f"Merged data has {len(merged_data)} rows")
-    
-    return merged_data, rule_descriptions
-
-# Function to create visualization for a specific rule
 def create_rule_visualization(rule_code, merged_data):
     """Create a visualization for a specific rule, adapting to its pattern"""
     
@@ -143,45 +85,76 @@ def create_rule_visualization(rule_code, merged_data):
         y_agg = 'count'
         y_label = 'Transaction Count'
     
-    # Use a more explicit approach to aggregation to avoid column count mismatches
-    # Create aggregation dictionary
-    aggregations = {}
+    # Perform the aggregation with explicit column names
+    print("Performing aggregation...")
     
-    # Always add the status mode
-    aggregations['status'] = lambda x: x.mode()[0] if not x.empty else 'Unknown'
+    # Create a dictionary mapping columns to their aggregation functions
+    agg_dict = {}
     
-    # Add transaction count
-    aggregations['hub_transaction_id'] = 'count'
-    
-    # Add metric aggregation
+    # Add the metric aggregation
     if y_agg == 'nunique':
-        aggregations[y_metric] = pd.Series.nunique
+        agg_dict[y_metric] = pd.Series.nunique
     else:
-        aggregations[y_metric] = y_agg
+        agg_dict[y_metric] = y_agg
+        
+    # Add transaction count aggregation (always a count)
+    agg_dict['hub_transaction_id'] = 'count'
+    
+    # Add status aggregation (mode)
+    agg_dict['status'] = lambda x: x.mode()[0] if not x.empty else 'Unknown'
     
     # Perform the aggregation
-    print("Aggregating data...")
-    aggregated_data = closed_rule_data.groupby(['alert_entity_id', 'time_period']).agg(aggregations)
+    aggregated_data = closed_rule_data.groupby(['alert_entity_id', 'time_period']).agg(agg_dict)
     
-    # Reset index to convert groupby result to DataFrame
+    # The aggregation result will have MultiIndex columns
+    print("Column structure after aggregation:", aggregated_data.columns)
+    
+    # Flatten the columns if they're MultiIndex
+    if isinstance(aggregated_data.columns, pd.MultiIndex):
+        aggregated_data.columns = [f"{col[0]}_{col[1]}" if col[1] != '' else col[0] for col in aggregated_data.columns]
+    
+    # Reset the index to make groupby columns into regular columns
     aggregated_data = aggregated_data.reset_index()
+    print("Columns after reset_index:", aggregated_data.columns.tolist())
     
-    # Print the column names to debug
-    print("Columns after aggregation:", aggregated_data.columns.tolist())
+    # Create a column for the metric value with a clear name
+    if f"{y_metric}_{y_agg}" in aggregated_data.columns:
+        aggregated_data['metric_value'] = aggregated_data[f"{y_metric}_{y_agg}"]
+    elif y_metric in aggregated_data.columns:
+        aggregated_data['metric_value'] = aggregated_data[y_metric]
+    else:
+        # Find the most likely column for our metric
+        potential_metric_cols = [col for col in aggregated_data.columns if y_metric in col]
+        if potential_metric_cols:
+            aggregated_data['metric_value'] = aggregated_data[potential_metric_cols[0]]
+        else:
+            print(f"Warning: Could not find metric column for {y_metric}. Using first numeric column.")
+            numeric_cols = [col for col in aggregated_data.columns if aggregated_data[col].dtype.kind in 'if']
+            if numeric_cols and numeric_cols[0] != 'alert_entity_id':
+                aggregated_data['metric_value'] = aggregated_data[numeric_cols[0]]
+            else:
+                print("Error: No suitable numeric columns found for plotting.")
+                return None
     
-    # Rename columns one by one to avoid length mismatch
-    aggregated_data = aggregated_data.rename(columns={
-        'hub_transaction_id': 'transaction_count',
-        y_metric: 'metric_value'
-    })
+    # Create a size column - default to hub_transaction_id_count if available
+    if 'hub_transaction_id_count' in aggregated_data.columns:
+        aggregated_data['transaction_count'] = aggregated_data['hub_transaction_id_count']
+    else:
+        # Find the hub_transaction_id column with count aggregation
+        transaction_count_col = [col for col in aggregated_data.columns if 'hub_transaction_id' in col and 'count' in col.lower()]
+        if transaction_count_col:
+            aggregated_data['transaction_count'] = aggregated_data[transaction_count_col[0]]
+        else:
+            # Create a dummy size column if needed
+            print("Warning: No transaction count column found. Using constant size.")
+            aggregated_data['transaction_count'] = 10  # Constant size as fallback
     
-    # Print the column names after renaming
-    print("Columns after renaming:", aggregated_data.columns.tolist())
+    print("Final columns for plotting:", aggregated_data.columns.tolist())
     
     # Create visualization
     plt.figure(figsize=(14, 10))
     
-    # Create scatter plot
+    # Create scatter plot with correct column names
     scatter = sns.scatterplot(
         data=aggregated_data,
         x='time_period',
@@ -305,21 +278,3 @@ def create_rule_visualization(rule_code, merged_data):
                         print(f"- Suggested threshold based on averages: {suggested_threshold:.2f}")
     
     return aggregated_data
-
-# Function to analyze a specific rule (e.g., TRP_0001)
-def analyze_specific_rule(rule_code):
-    """Run analysis for a specific rule code"""
-    
-    # Load data with joined rule information
-    merged_data, rule_descriptions = load_and_prepare_data()
-    
-    # Run visualization for the specific rule
-    result = create_rule_visualization(rule_code, merged_data)
-    
-    return result
-
-# Execute analysis for TRP_0001
-if __name__ == "__main__":
-    print("Starting analysis for TRP_0001...")
-    trp_0001_result = analyze_specific_rule("TRP_0001")
-    print("\nAnalysis complete!")
