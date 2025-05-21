@@ -143,30 +143,40 @@ def create_rule_visualization(rule_code, merged_data):
         y_agg = 'count'
         y_label = 'Transaction Count'
     
-    # Aggregate data based on alert_entity_id and time period
+    # Use a more explicit approach to aggregation to avoid column count mismatches
+    # Create aggregation dictionary
+    aggregations = {}
+    
+    # Always add the status mode
+    aggregations['status'] = lambda x: x.mode()[0] if not x.empty else 'Unknown'
+    
+    # Add transaction count
+    aggregations['hub_transaction_id'] = 'count'
+    
+    # Add metric aggregation
     if y_agg == 'nunique':
-        # For unique counts, we need to use the nunique aggregation
-        agg_dict = {
-            y_metric: pd.Series.nunique,
-            'hub_transaction_id': 'count',
-            'status': lambda x: x.mode()[0] if not x.empty else 'Unknown'
-        }
+        aggregations[y_metric] = pd.Series.nunique
     else:
-        # For other aggregations, use the string name
-        agg_dict = {
-            y_metric: y_agg,
-            'hub_transaction_id': 'count',
-            'status': lambda x: x.mode()[0] if not x.empty else 'Unknown'
-        }
+        aggregations[y_metric] = y_agg
     
-    aggregated_data = closed_rule_data.groupby(['alert_entity_id', 'time_period']).agg(agg_dict).reset_index()
+    # Perform the aggregation
+    print("Aggregating data...")
+    aggregated_data = closed_rule_data.groupby(['alert_entity_id', 'time_period']).agg(aggregations)
     
-    # Rename columns for clarity
-    if y_agg == 'count' and y_metric == 'hub_transaction_id':
-        # Avoid duplicate column names when counting hub_transaction_id
-        aggregated_data.columns = ['alert_entity_id', 'time_period', 'metric_value', 'transaction_count', 'status']
-    else:
-        aggregated_data.columns = ['alert_entity_id', 'time_period', 'metric_value', 'transaction_count', 'status']
+    # Reset index to convert groupby result to DataFrame
+    aggregated_data = aggregated_data.reset_index()
+    
+    # Print the column names to debug
+    print("Columns after aggregation:", aggregated_data.columns.tolist())
+    
+    # Rename columns one by one to avoid length mismatch
+    aggregated_data = aggregated_data.rename(columns={
+        'hub_transaction_id': 'transaction_count',
+        y_metric: 'metric_value'
+    })
+    
+    # Print the column names after renaming
+    print("Columns after renaming:", aggregated_data.columns.tolist())
     
     # Create visualization
     plt.figure(figsize=(14, 10))
