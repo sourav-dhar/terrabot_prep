@@ -1,436 +1,128 @@
-# Import necessary libraries
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from datetime import datetime, timedelta
-import os
-
-# Set visualization style
-plt.style.use('ggplot')
-sns.set(style="whitegrid")
-
-# Create output directory for visualizations
-os.makedirs('rule_threshold_visualizations', exist_ok=True)
-===========================================================
-# Load transaction data
-def load_data():
-    """Load all data from Excel file"""
-    # Read transaction data
-    transaction_data = pd.read_excel('transaction_dummy_data_10k_final.xlsx', 
-                                     sheet_name='transaction_dummy_data_10k')
+def create_rule_visualization(rule, transaction_data, rule_descriptions, rule_thresholds):
+    """Create a visualization for a specific rule, adapting to its pattern"""
     
-    # Read rule descriptions
-    rule_descriptions = pd.read_excel('transaction_dummy_data_10k_final.xlsx', 
-                                     sheet_name='rule_description')
+    print(f"\nAnalyzing rule: {rule}")
     
-    # Convert dates to datetime if not already
-    date_columns = ['transaction_date_time_local', 'created_at', 'closed_at', 
-                    'kyc_sender_create_date', 'kyc_receiver_create_date',
-                    'dob_sender', 'dob_receiver', 'self_closure_date']
+    # Filter data for this rule
+    rule_data = transaction_data[transaction_data['alert_rules'] == rule].copy()
     
-    for col in date_columns:
-        if col in transaction_data.columns:
-            transaction_data[col] = pd.to_datetime(transaction_data[col])
+    if rule_data.empty:
+        print(f"No data found for rule {rule}")
+        return
     
-    return transaction_data, rule_descriptions
-
-# Load the data
-transaction_data, rule_descriptions = load_data()
-
-# Explore the data
-print(f"Transaction data shape: {transaction_data.shape}")
-print(f"Rule descriptions shape: {rule_descriptions.shape}")
-
-# Check the columns
-print("\nTransaction data columns:")
-print(transaction_data.columns.tolist())
-
-# Check rule patterns and frequencies
-print("\nRule patterns:")
-print(transaction_data['rule_pattern'].unique())
-print("\nRule frequencies:")
-print(transaction_data['rule_frequency'].unique())
-
-# Check alert statuses
-print("\nAlert statuses:")
-print(transaction_data['status'].value_counts())
-
-# Check alert entity distribution
-print("\nTriggered on distribution:")
-print(transaction_data['triggered_on'].value_counts())
-
-# Look at rule descriptions
-print("\nSample rule descriptions:")
-print(rule_descriptions.head())
-===========================================================
-# Map thresholds to rules
-def map_thresholds_to_rules():
-    """Map thresholds to rules from rule descriptions"""
-    # Create a dictionary mapping rule number to threshold
-    threshold_map = {}
+    # Get rule information
+    rule_pattern = rule_data['rule_pattern'].iloc[0] if 'rule_pattern' in rule_data.columns and not rule_data['rule_pattern'].empty else "Unknown"
+    rule_frequency = rule_data['rule_frequency'].iloc[0] if 'rule_frequency' in rule_data.columns and not rule_data['rule_frequency'].empty else "Unknown"
+    rule_threshold = rule_thresholds.get(rule, "Unknown")
     
-    for _, row in rule_descriptions.iterrows():
-        rule_no = row['Rule no.']
-        threshold = row['Current threshold']
-        # Convert threshold to numeric if possible
-        try:
-            # Check if threshold contains symbols like '>' or '>='
-            if isinstance(threshold, str) and ('>' in threshold):
-                # Extract the numeric part
-                threshold = float(threshold.replace('>', '').replace('=', '').strip())
+    # Get rule description
+    rule_desc = ""
+    rule_desc_row = rule_descriptions[rule_descriptions['Rule no.'] == rule]
+    if not rule_desc_row.empty:
+        rule_desc = rule_desc_row['Rule description'].iloc[0]
+    
+    print(f"Pattern: {rule_pattern}, Frequency: {rule_frequency}")
+    print(f"Threshold: {rule_threshold}")
+    print(f"Description: {rule_desc}")
+    
+    # Check closed alerts for TP/FP analysis
+    closed_rule_data = rule_data[rule_data['status'].isin(['Closed TP', 'Closed FP'])]
+    if closed_rule_data.empty:
+        print(f"No closed alerts (TP/FP) for rule {rule}. Using all data.")
+        closed_rule_data = rule_data
+    
+    # Determine time periods based on rule frequency
+    if rule_frequency == 'daily':
+        closed_rule_data['time_period'] = closed_rule_data['transaction_date_time_local'].dt.date
+        time_period_label = 'Transaction Date'
+    elif rule_frequency == 'Weekly':
+        closed_rule_data['time_period'] = closed_rule_data['transaction_date_time_local'].dt.strftime('%Y-W%U')
+        time_period_label = 'Year-Week'
+    elif rule_frequency == 'Monthly':
+        closed_rule_data['time_period'] = closed_rule_data['transaction_date_time_local'].dt.strftime('%Y-%m')
+        time_period_label = 'Year-Month'
+    else:
+        closed_rule_data['time_period'] = closed_rule_data['transaction_date_time_local'].dt.date
+        time_period_label = 'Transaction Date'
+    
+    # Determine y-axis metric and aggregation based on rule pattern
+    if isinstance(rule_pattern, str):
+        if "Volume" in rule_pattern:
+            # For Volume pattern, find appropriate amount field
+            volume_fields = [col for col in closed_rule_data.columns if 'volume' in col.lower() or 'amount' in col.lower() or 'value' in col.lower()]
+            if 'usd_value' in closed_rule_data.columns:
+                y_metric = 'usd_value'
+            elif volume_fields:
+                y_metric = volume_fields[0]
             else:
-                threshold = float(threshold)
-        except (ValueError, TypeError):
-            # If conversion fails, keep as is
-            pass
-        
-        threshold_map[rule_no] = threshold
-    
-    return threshold_map
-
-# Get threshold mapping
-rule_thresholds = map_thresholds_to_rules()
-
-# Display a few thresholds
-print("Sample rule thresholds:")
-for rule, threshold in list(rule_thresholds.items())[:5]:
-    print(f"Rule {rule}: {threshold}")
-==============================================================
-def create_rule_scatter_plots(transaction_data, rule_descriptions, rule_thresholds):
-    """Create scatter plots for each rule, showing data points relative to thresholds"""
-    
-    # Get all unique rules
-    unique_rules = transaction_data['alert_rules'].unique()
-    
-    # For each rule, create a scatter plot
-    for rule in unique_rules:
-        try:
-            print(f"\nProcessing rule: {rule}")
-            
-            # Filter data for this rule
-            rule_data = transaction_data[transaction_data['alert_rules'] == rule].copy()
-            
-            # Skip if no closed alerts (no TP/FP classification)
-            closed_rule_data = rule_data[rule_data['status'].isin(['Closed TP', 'Closed FP'])]
-            if len(closed_rule_data) == 0:
-                print(f"  No closed alerts for rule {rule}. Skipping.")
-                continue
-            
-            # Get rule information
-            rule_pattern = rule_data['rule_pattern'].iloc[0] if not rule_data['rule_pattern'].empty else "Unknown"
-            rule_frequency = rule_data['rule_frequency'].iloc[0] if not rule_data['rule_frequency'].empty else "Unknown"
-            rule_threshold = rule_thresholds.get(rule, "Unknown")
-            
-            # Get rule description
-            rule_desc = ""
-            rule_desc_row = rule_descriptions[rule_descriptions['Rule no.'] == rule]
-            if not rule_desc_row.empty:
-                rule_desc = rule_desc_row['Rule description'].iloc[0]
-            
-            print(f"  Pattern: {rule_pattern}, Frequency: {rule_frequency}")
-            print(f"  Threshold: {rule_threshold}")
-            print(f"  Description: {rule_desc}")
-            
-            # Determine the appropriate metric based on rule pattern
-            if isinstance(rule_pattern, str):
-                if "Volume" in rule_pattern:
-                    create_volume_rule_plot(rule, rule_data, rule_pattern, rule_frequency, rule_threshold, rule_desc)
-                elif "Velocity" in rule_pattern:
-                    create_velocity_rule_plot(rule, rule_data, rule_pattern, rule_frequency, rule_threshold, rule_desc)
-                elif "1 to Many" in rule_pattern:
-                    create_one_to_many_rule_plot(rule, rule_data, rule_pattern, rule_frequency, rule_threshold, rule_desc)
-                elif "Many to 1" in rule_pattern:
-                    create_many_to_one_rule_plot(rule, rule_data, rule_pattern, rule_frequency, rule_threshold, rule_desc)
-                else:
-                    print(f"  Unrecognized rule pattern: {rule_pattern}. Using default visualization.")
-                    create_default_rule_plot(rule, rule_data, rule_pattern, rule_frequency, rule_threshold, rule_desc)
-            else:
-                print(f"  Rule pattern not available. Using default visualization.")
-                create_default_rule_plot(rule, rule_data, rule_pattern, rule_frequency, rule_threshold, rule_desc)
+                print("No suitable volume field found, using transaction count instead")
+                y_metric = 'hub_transaction_id'
                 
-        except Exception as e:
-            print(f"  Error processing rule {rule}: {e}")
-            import traceback
-            traceback.print_exc()
-=========================================================================================================================
-def create_volume_rule_plot(rule, rule_data, rule_pattern, rule_frequency, rule_threshold, rule_desc):
-    """Create scatter plot for Volume pattern rules"""
-    print("  Creating Volume rule plot...")
-    
-    # Determine alert entity ID based on triggered_on
-    rule_data['alert_entity_id'] = rule_data.apply(
-        lambda x: x['sender_kyc_id_no'] if x['triggered_on'] == 'sender' else x['receiver_kyc_id_no'], 
-        axis=1
-    )
-    
-    # Determine the appropriate volume field
-    # Try different possible column names for transaction volume
-    volume_columns = [col for col in rule_data.columns if 'volume' in col.lower() or 'amount' in col.lower() or 'value' in col.lower()]
-    
-    if 'usd_value' in rule_data.columns:
-        volume_field = 'usd_value'
-    elif volume_columns:
-        volume_field = volume_columns[0]
-    else:
-        print("  No suitable volume field found. Using a dummy value.")
-        rule_data['dummy_volume'] = 1.0
-        volume_field = 'dummy_volume'
-    
-    # Group by alert entity and calculate aggregated metrics
-    if rule_frequency == 'daily':
-        # Add date column
-        rule_data['transaction_date'] = rule_data['transaction_date_time_local'].dt.date
-        
-        # Group by entity and date
-        agg_data = rule_data.groupby(['alert_entity_id', 'transaction_date']).agg({
-            volume_field: 'sum',
-            'alert_entity_id': 'count',
-            'status': lambda x: x.mode()[0] if not x.empty else 'Unknown'
-        }).reset_index()
-        
-        agg_data.columns = ['alert_entity_id', 'transaction_date', 'total_volume', 'transaction_count', 'status']
-        x_label = 'Transaction Date'
-        x_field = 'transaction_date'
-        
-    elif rule_frequency == 'Weekly':
-        # Add week column
-        rule_data['transaction_week'] = rule_data['transaction_date_time_local'].dt.isocalendar().week
-        rule_data['transaction_year'] = rule_data['transaction_date_time_local'].dt.isocalendar().year
-        
-        # Group by entity and week
-        agg_data = rule_data.groupby(['alert_entity_id', 'transaction_year', 'transaction_week']).agg({
-            volume_field: 'sum',
-            'alert_entity_id': 'count',
-            'status': lambda x: x.mode()[0] if not x.empty else 'Unknown'
-        }).reset_index()
-        
-        agg_data.columns = ['alert_entity_id', 'transaction_year', 'transaction_week', 
-                            'total_volume', 'transaction_count', 'status']
-        agg_data['year_week'] = agg_data['transaction_year'].astype(str) + '-' + agg_data['transaction_week'].astype(str)
-        x_label = 'Year-Week'
-        x_field = 'year_week'
-        
-    elif rule_frequency == 'Monthly':
-        # Add month column
-        rule_data['transaction_month'] = rule_data['transaction_date_time_local'].dt.month
-        rule_data['transaction_year'] = rule_data['transaction_date_time_local'].dt.year
-        
-        # Group by entity and month
-        agg_data = rule_data.groupby(['alert_entity_id', 'transaction_year', 'transaction_month']).agg({
-            volume_field: 'sum',
-            'alert_entity_id': 'count',
-            'status': lambda x: x.mode()[0] if not x.empty else 'Unknown'
-        }).reset_index()
-        
-        agg_data.columns = ['alert_entity_id', 'transaction_year', 'transaction_month', 
-                            'total_volume', 'transaction_count', 'status']
-        agg_data['year_month'] = agg_data['transaction_year'].astype(str) + '-' + agg_data['transaction_month'].astype(str)
-        x_label = 'Year-Month'
-        x_field = 'year_month'
-        
-    else:
-        # If frequency is unknown, just group by entity
-        agg_data = rule_data.groupby('alert_entity_id').agg({
-            volume_field: 'sum',
-            'alert_entity_id': 'count',
-            'status': lambda x: x.mode()[0] if not x.empty else 'Unknown'
-        }).reset_index()
-        
-        agg_data.columns = ['alert_entity_id', 'total_volume', 'transaction_count', 'status']
-        
-        # Create a dummy ordering field
-        agg_data['entity_order'] = range(len(agg_data))
-        x_label = 'Entity Order'
-        x_field = 'entity_order'
-    
-    # Create scatter plot
-    plt.figure(figsize=(12, 8))
-    
-    scatter = sns.scatterplot(
-        data=agg_data,
-        x=x_field,
-        y='total_volume',
-        hue='status',
-        size='transaction_count',
-        sizes=(50, 300),
-        alpha=0.7,
-        palette={'Closed TP': 'green', 'Closed FP': 'red'}
-    )
-    
-    # Add a threshold line if available and numeric
-    if isinstance(rule_threshold, (int, float)):
-        plt.axhline(y=rule_threshold, color='blue', linestyle='--', label=f'Threshold: {rule_threshold}')
-    
-    # Set title and labels
-    plt.title(f'Rule {rule}: {rule_desc}\n(Pattern: {rule_pattern}, Frequency: {rule_frequency})')
-    plt.xlabel(x_label)
-    plt.ylabel('Total Volume')
-    
-    # Add legend and adjust plot elements
-    plt.legend(title='Status')
-    plt.grid(True, alpha=0.3)
-    
-    # Handle x-axis for categorical variables
-    if x_field in ['year_week', 'year_month', 'entity_order']:
-        if len(agg_data[x_field].unique()) > 20:
-            # If too many categories, only show a subset
-            plt.xticks(rotation=45, ha='right')
-            every_nth = max(1, len(agg_data[x_field].unique()) // 20)
-            for n, label in enumerate(plt.gca().xaxis.get_ticklabels()):
-                if n % every_nth != 0:
-                    label.set_visible(False)
+            y_agg = 'sum'
+            y_label = f'Total {y_metric.replace("_", " ").title()}'
+            
+        elif "Velocity" in rule_pattern:
+            # For Velocity pattern, count transactions
+            y_metric = 'hub_transaction_id'
+            y_agg = 'count'
+            y_label = 'Transaction Count'
+            
+        elif "1 to Many" in rule_pattern:
+            # For 1-to-Many pattern, count unique receivers
+            y_metric = 'receiver_kyc_id_no'
+            y_agg = 'nunique'
+            y_label = 'Unique Receiver Count'
+            
+        elif "Many to 1" in rule_pattern:
+            # For Many-to-1 pattern, count unique senders
+            y_metric = 'sender_kyc_id_no'
+            y_agg = 'nunique'
+            y_label = 'Unique Sender Count'
+            
         else:
-            plt.xticks(rotation=45, ha='right')
-    
-    # Adjust layout and save figure
-    plt.tight_layout()
-    plt.savefig(f'rule_threshold_visualizations/rule_{rule}_volume.png')
-    plt.close()
-    
-    print(f"  Created Volume rule plot for {rule}")
-=================================================================================
-def create_velocity_rule_plot(rule, rule_data, rule_pattern, rule_frequency, rule_threshold, rule_desc):
-    """Create scatter plot for Velocity pattern rules"""
-    print("  Creating Velocity rule plot...")
-    
-    # Determine alert entity ID based on triggered_on
-    rule_data['alert_entity_id'] = rule_data.apply(
-        lambda x: x['sender_kyc_id_no'] if x['triggered_on'] == 'sender' else x['receiver_kyc_id_no'], 
-        axis=1
-    )
-    
-    # Determine time period based on rule frequency
-    if rule_frequency == 'daily':
-        # Add date column
-        rule_data['time_period'] = rule_data['transaction_date_time_local'].dt.date
-        time_period_label = 'Date'
-        
-    elif rule_frequency == 'Weekly':
-        # Create a year-week identifier
-        rule_data['year'] = rule_data['transaction_date_time_local'].dt.isocalendar().year
-        rule_data['week'] = rule_data['transaction_date_time_local'].dt.isocalendar().week
-        rule_data['time_period'] = rule_data['year'].astype(str) + '-W' + rule_data['week'].astype(str)
-        time_period_label = 'Year-Week'
-        
-    elif rule_frequency == 'Monthly':
-        # Create a year-month identifier
-        rule_data['year'] = rule_data['transaction_date_time_local'].dt.year
-        rule_data['month'] = rule_data['transaction_date_time_local'].dt.month
-        rule_data['time_period'] = rule_data['year'].astype(str) + '-' + rule_data['month'].astype(str)
-        time_period_label = 'Year-Month'
-        
+            # Default to transaction count for unknown patterns
+            y_metric = 'hub_transaction_id'
+            y_agg = 'count'
+            y_label = 'Transaction Count'
     else:
-        # Default to date if frequency is unknown
-        rule_data['time_period'] = rule_data['transaction_date_time_local'].dt.date
-        time_period_label = 'Date'
+        # Default to transaction count for non-string patterns
+        y_metric = 'hub_transaction_id'
+        y_agg = 'count'
+        y_label = 'Transaction Count'
     
-    # Count transactions per entity per time period
-    velocity_data = rule_data.groupby(['alert_entity_id', 'time_period']).agg({
-        'transaction_id': 'count',  # Assuming there's a transaction_id column
-        'status': lambda x: x.mode()[0] if not x.empty else 'Unknown',
-        'alert_entity_id': 'size'  # Get count of transactions
-    }).reset_index()
+    # Aggregate data based on alert_entity_id and time period
+    if y_agg == 'nunique':
+        # For unique counts, we need to use the nunique aggregation
+        agg_dict = {
+            y_metric: pd.Series.nunique,
+            'hub_transaction_id': 'count',
+            'status': lambda x: x.mode()[0] if not x.empty else 'Unknown'
+        }
+    else:
+        # For other aggregations, use the string name
+        agg_dict = {
+            y_metric: y_agg,
+            'hub_transaction_id': 'count',
+            'status': lambda x: x.mode()[0] if not x.empty else 'Unknown'
+        }
     
-    velocity_data.columns = ['alert_entity_id', 'time_period', 'transaction_count', 'status', 'total_transactions']
+    aggregated_data = closed_rule_data.groupby(['alert_entity_id', 'time_period']).agg(agg_dict).reset_index()
+    
+    # Rename columns for clarity
+    if y_agg == 'count' and y_metric == 'hub_transaction_id':
+        # Avoid duplicate column names when counting hub_transaction_id
+        aggregated_data.columns = ['alert_entity_id', 'time_period', 'metric_value', 'transaction_count', 'status']
+    else:
+        aggregated_data.columns = ['alert_entity_id', 'time_period', 'metric_value', 'transaction_count', 'status']
+    
+    # Create visualization
+    plt.figure(figsize=(14, 10))
     
     # Create scatter plot
-    plt.figure(figsize=(12, 8))
-    
     scatter = sns.scatterplot(
-        data=velocity_data,
+        data=aggregated_data,
         x='time_period',
-        y='transaction_count',
-        hue='status',
-        size='total_transactions',
-        sizes=(50, 300),
-        alpha=0.7,
-        palette={'Closed TP': 'green', 'Closed FP': 'red'}
-    )
-    
-    # Add a threshold line if available and numeric
-    if isinstance(rule_threshold, (int, float)):
-        plt.axhline(y=rule_threshold, color='blue', linestyle='--', label=f'Threshold: {rule_threshold}')
-    
-    # Set title and labels
-    plt.title(f'Rule {rule}: {rule_desc}\n(Pattern: {rule_pattern}, Frequency: {rule_frequency})')
-    plt.xlabel(time_period_label)
-    plt.ylabel('Transaction Count (Velocity)')
-    
-    # Add legend and adjust plot elements
-    plt.legend(title='Status')
-    plt.grid(True, alpha=0.3)
-    
-    # Handle x-axis for numerous time periods
-    if len(velocity_data['time_period'].unique()) > 20:
-        plt.xticks(rotation=45, ha='right')
-        # Show only a subset of time periods
-        every_nth = max(1, len(velocity_data['time_period'].unique()) // 20)
-        for n, label in enumerate(plt.gca().xaxis.get_ticklabels()):
-            if n % every_nth != 0:
-                label.set_visible(False)
-    else:
-        plt.xticks(rotation=45, ha='right')
-    
-    # Adjust layout and save figure
-    plt.tight_layout()
-    plt.savefig(f'rule_threshold_visualizations/rule_{rule}_velocity.png')
-    plt.close()
-    
-    print(f"  Created Velocity rule plot for {rule}")
-============================================================================
-def create_one_to_many_rule_plot(rule, rule_data, rule_pattern, rule_frequency, rule_threshold, rule_desc):
-    """Create scatter plot for 1-to-Many pattern rules"""
-    print("  Creating 1-to-Many rule plot...")
-    
-    # Filter for sender triggered alerts
-    sender_data = rule_data[rule_data['triggered_on'] == 'sender'].copy()
-    
-    if sender_data.empty:
-        print("  No sender data for this rule. Skipping 1-to-Many plot.")
-        return
-    
-    # Determine time period based on rule frequency
-    if rule_frequency == 'daily':
-        # Add date column
-        sender_data['time_period'] = sender_data['transaction_date_time_local'].dt.date
-        time_period_label = 'Date'
-        
-    elif rule_frequency == 'Weekly':
-        # Create a year-week identifier
-        sender_data['year'] = sender_data['transaction_date_time_local'].dt.isocalendar().year
-        sender_data['week'] = sender_data['transaction_date_time_local'].dt.isocalendar().week
-        sender_data['time_period'] = sender_data['year'].astype(str) + '-W' + sender_data['week'].astype(str)
-        time_period_label = 'Year-Week'
-        
-    elif rule_frequency == 'Monthly':
-        # Create a year-month identifier
-        sender_data['year'] = sender_data['transaction_date_time_local'].dt.year
-        sender_data['month'] = sender_data['transaction_date_time_local'].dt.month
-        sender_data['time_period'] = sender_data['year'].astype(str) + '-' + sender_data['month'].astype(str)
-        time_period_label = 'Year-Month'
-        
-    else:
-        # Default to date if frequency is unknown
-        sender_data['time_period'] = sender_data['transaction_date_time_local'].dt.date
-        time_period_label = 'Date'
-    
-    # Count unique receivers per sender per time period
-    unique_receivers_data = sender_data.groupby(['sender_kyc_id_no', 'time_period']).agg({
-        'receiver_kyc_id_no': pd.Series.nunique,  # Count unique receivers
-        'status': lambda x: x.mode()[0] if not x.empty else 'Unknown',
-        'transaction_id': 'count'  # Count transactions
-    }).reset_index()
-    
-    unique_receivers_data.columns = ['sender_kyc_id_no', 'time_period', 'unique_receiver_count', 'status', 'transaction_count']
-    
-    # Create scatter plot
-    plt.figure(figsize=(12, 8))
-    
-    scatter = sns.scatterplot(
-        data=unique_receivers_data,
-        x='time_period',
-        y='unique_receiver_count',
+        y='metric_value',
         hue='status',
         size='transaction_count',
         sizes=(50, 300),
@@ -438,201 +130,137 @@ def create_one_to_many_rule_plot(rule, rule_data, rule_pattern, rule_frequency, 
         palette={'Closed TP': 'green', 'Closed FP': 'red'}
     )
     
-    # Add a threshold line if available and numeric
+    # Add threshold line
     if isinstance(rule_threshold, (int, float)):
         plt.axhline(y=rule_threshold, color='blue', linestyle='--', label=f'Threshold: {rule_threshold}')
+        
+        # Add points above threshold text
+        points_above = aggregated_data[aggregated_data['metric_value'] > rule_threshold].shape[0]
+        total_points = aggregated_data.shape[0]
+        percent_above = (points_above / total_points) * 100 if total_points > 0 else 0
+        
+        plt.text(
+            0.05, 0.95, 
+            f"Points above threshold: {points_above}/{total_points} ({percent_above:.1f}%)",
+            transform=plt.gca().transAxes,
+            bbox=dict(facecolor='white', alpha=0.8),
+            verticalalignment='top'
+        )
+    
+    # Add TP/FP counts
+    tp_count = aggregated_data[aggregated_data['status'] == 'Closed TP'].shape[0]
+    fp_count = aggregated_data[aggregated_data['status'] == 'Closed FP'].shape[0]
+    
+    plt.text(
+        0.05, 0.90, 
+        f"True Positives: {tp_count}, False Positives: {fp_count}",
+        transform=plt.gca().transAxes,
+        bbox=dict(facecolor='white', alpha=0.8),
+        verticalalignment='top'
+    )
     
     # Set title and labels
     plt.title(f'Rule {rule}: {rule_desc}\n(Pattern: {rule_pattern}, Frequency: {rule_frequency})')
     plt.xlabel(time_period_label)
-    plt.ylabel('Unique Receiver Count')
+    plt.ylabel(y_label)
     
-    # Add legend and adjust plot elements
-    plt.legend(title='Status')
-    plt.grid(True, alpha=0.3)
+    # Format x-axis for better readability
+    plt.xticks(rotation=45, ha='right')
     
     # Handle x-axis for numerous time periods
-    if len(unique_receivers_data['time_period'].unique()) > 20:
-        plt.xticks(rotation=45, ha='right')
+    if len(aggregated_data['time_period'].unique()) > 20:
         # Show only a subset of time periods
-        every_nth = max(1, len(unique_receivers_data['time_period'].unique()) // 20)
+        every_nth = max(1, len(aggregated_data['time_period'].unique()) // 20)
         for n, label in enumerate(plt.gca().xaxis.get_ticklabels()):
             if n % every_nth != 0:
                 label.set_visible(False)
-    else:
-        plt.xticks(rotation=45, ha='right')
     
-    # Adjust layout and save figure
-    plt.tight_layout()
-    plt.savefig(f'rule_threshold_visualizations/rule_{rule}_one_to_many.png')
-    plt.close()
-    
-    print(f"  Created 1-to-Many rule plot for {rule}")
-=====================================================================================
-def create_many_to_one_rule_plot(rule, rule_data, rule_pattern, rule_frequency, rule_threshold, rule_desc):
-    """Create scatter plot for Many-to-1 pattern rules"""
-    print("  Creating Many-to-1 rule plot...")
-    
-    # Filter for receiver triggered alerts
-    receiver_data = rule_data[rule_data['triggered_on'] == 'receiver'].copy()
-    
-    if receiver_data.empty:
-        print("  No receiver data for this rule. Skipping Many-to-1 plot.")
-        return
-    
-    # Determine time period based on rule frequency
-    if rule_frequency == 'daily':
-        # Add date column
-        receiver_data['time_period'] = receiver_data['transaction_date_time_local'].dt.date
-        time_period_label = 'Date'
-        
-    elif rule_frequency == 'Weekly':
-        # Create a year-week identifier
-        receiver_data['year'] = receiver_data['transaction_date_time_local'].dt.isocalendar().year
-        receiver_data['week'] = receiver_data['transaction_date_time_local'].dt.isocalendar().week
-        receiver_data['time_period'] = receiver_data['year'].astype(str) + '-W' + receiver_data['week'].astype(str)
-        time_period_label = 'Year-Week'
-        
-    elif rule_frequency == 'Monthly':
-        # Create a year-month identifier
-        receiver_data['year'] = receiver_data['transaction_date_time_local'].dt.year
-        receiver_data['month'] = receiver_data['transaction_date_time_local'].dt.month
-        receiver_data['time_period'] = receiver_data['year'].astype(str) + '-' + receiver_data['month'].astype(str)
-        time_period_label = 'Year-Month'
-        
-    else:
-        # Default to date if frequency is unknown
-        receiver_data['time_period'] = receiver_data['transaction_date_time_local'].dt.date
-        time_period_label = 'Date'
-    
-    # Count unique senders per receiver per time period
-    unique_senders_data = receiver_data.groupby(['receiver_kyc_id_no', 'time_period']).agg({
-        'sender_kyc_id_no': pd.Series.nunique,  # Count unique senders
-        'status': lambda x: x.mode()[0] if not x.empty else 'Unknown',
-        'transaction_id': 'count'  # Count transactions
-    }).reset_index()
-    
-    unique_senders_data.columns = ['receiver_kyc_id_no', 'time_period', 'unique_sender_count', 'status', 'transaction_count']
-    
-    # Create scatter plot
-    plt.figure(figsize=(12, 8))
-    
-    scatter = sns.scatterplot(
-        data=unique_senders_data,
-        x='time_period',
-        y='unique_sender_count',
-        hue='status',
-        size='transaction_count',
-        sizes=(50, 300),
-        alpha=0.7,
-        palette={'Closed TP': 'green', 'Closed FP': 'red'}
-    )
-    
-    # Add a threshold line if available and numeric
-    if isinstance(rule_threshold, (int, float)):
-        plt.axhline(y=rule_threshold, color='blue', linestyle='--', label=f'Threshold: {rule_threshold}')
-    
-    # Set title and labels
-    plt.title(f'Rule {rule}: {rule_desc}\n(Pattern: {rule_pattern}, Frequency: {rule_frequency})')
-    plt.xlabel(time_period_label)
-    plt.ylabel('Unique Sender Count')
-    
-    # Add legend and adjust plot elements
+    # Add legend
     plt.legend(title='Status')
-    plt.grid(True, alpha=0.3)
     
-    # Handle x-axis for numerous time periods
-    if len(unique_senders_data['time_period'].unique()) > 20:
-        plt.xticks(rotation=45, ha='right')
-        # Show only a subset of time periods
-        every_nth = max(1, len(unique_senders_data['time_period'].unique()) // 20)
-        for n, label in enumerate(plt.gca().xaxis.get_ticklabels()):
-            if n % every_nth != 0:
-                label.set_visible(False)
-    else:
-        plt.xticks(rotation=45, ha='right')
-    
-    # Adjust layout and save figure
+    # Adjust layout
     plt.tight_layout()
-    plt.savefig(f'rule_threshold_visualizations/rule_{rule}_many_to_one.png')
+    
+    # Save figure
+    plt.savefig(f'rule_threshold_visualizations/rule_{rule}_analysis.png')
     plt.close()
     
-    print(f"  Created Many-to-1 rule plot for {rule}")
-===================================================================================================
-def create_default_rule_plot(rule, rule_data, rule_pattern, rule_frequency, rule_threshold, rule_desc):
-    """Create a default scatter plot for rules that don't match specific patterns"""
-    print("  Creating default rule plot...")
+    print(f"Analysis complete for rule {rule}. Visualization saved.")
     
-    # Determine alert entity ID based on triggered_on
-    rule_data['alert_entity_id'] = rule_data.apply(
-        lambda x: x['sender_kyc_id_no'] if x['triggered_on'] == 'sender' else x['receiver_kyc_id_no'], 
-        axis=1
-    )
+    # Additional insights
+    print("\nInsights:")
     
-    # Try to find relevant metrics for this rule
-    # Check for commonly used metrics
-    possible_metrics = ['usd_value', 'transaction_amount', 'amount', 'value']
-    metric_field = None
+    # Calculate TP/FP rate
+    total_classified = tp_count + fp_count
+    tp_rate = (tp_count / total_classified) * 100 if total_classified > 0 else 0
+    fp_rate = (fp_count / total_classified) * 100 if total_classified > 0 else 0
     
-    for metric in possible_metrics:
-        if metric in rule_data.columns:
-            metric_field = metric
-            break
+    print(f"- TP Rate: {tp_rate:.2f}%, FP Rate: {fp_rate:.2f}%")
     
-    if metric_field is None:
-        # If no standard metric found, create a dummy one
-        rule_data['transaction_metric'] = 1.0
-        metric_field = 'transaction_metric'
+    # Calculate average metric value for TP vs FP
+    avg_metric_tp = aggregated_data[aggregated_data['status'] == 'Closed TP']['metric_value'].mean()
+    avg_metric_fp = aggregated_data[aggregated_data['status'] == 'Closed FP']['metric_value'].mean()
     
-    # Group by alert entity
-    agg_data = rule_data.groupby('alert_entity_id').agg({
-        metric_field: ['sum', 'mean'],
-        'alert_entity_id': 'count',
-        'status': lambda x: x.mode()[0] if not x.empty else 'Unknown'
-    }).reset_index()
+    print(f"- Average {y_label} for TP: {avg_metric_tp:.2f}")
+    print(f"- Average {y_label} for FP: {avg_metric_fp:.2f}")
     
-    agg_data.columns = ['alert_entity_id', 'total_metric', 'avg_metric', 'transaction_count', 'status']
-    
-    # Create a dummy x-axis for ordering
-    agg_data['entity_order'] = range(len(agg_data))
-    
-    # Create scatter plot
-    plt.figure(figsize=(12, 8))
-    
-    scatter = sns.scatterplot(
-        data=agg_data,
-        x='entity_order',
-        y='total_metric',
-        hue='status',
-        size='transaction_count',
-        sizes=(50, 300),
-        alpha=0.7,
-        palette={'Closed TP': 'green', 'Closed FP': 'red'}
-    )
-    
-    # Add a threshold line if available and numeric
+    # Calculate threshold effectiveness
     if isinstance(rule_threshold, (int, float)):
-        plt.axhline(y=rule_threshold, color='blue', linestyle='--', label=f'Threshold: {rule_threshold}')
+        false_positives_above = aggregated_data[(aggregated_data['status'] == 'Closed FP') & 
+                                             (aggregated_data['metric_value'] > rule_threshold)].shape[0]
+        true_positives_below = aggregated_data[(aggregated_data['status'] == 'Closed TP') & 
+                                             (aggregated_data['metric_value'] <= rule_threshold)].shape[0]
+        
+        print(f"- False positives above threshold: {false_positives_above}")
+        print(f"- True positives below threshold: {true_positives_below}")
+        
+        # Suggest threshold adjustment if needed
+        if false_positives_above > 0 or true_positives_below > 0:
+            # Find potential optimal threshold
+            from sklearn.metrics import roc_curve
+            
+            # Only perform ROC analysis if we have both TP and FP
+            if tp_count > 0 and fp_count > 0:
+                try:
+                    # Convert status to binary (1 for TP, 0 for FP)
+                    y_true = (aggregated_data['status'] == 'Closed TP').astype(int)
+                    y_scores = aggregated_data['metric_value']
+                    
+                    # Calculate ROC curve
+                    fpr, tpr, thresholds = roc_curve(y_true, y_scores)
+                    
+                    # Find threshold with best balance (closest to top-left corner)
+                    optimal_idx = np.argmin(np.sqrt((1-tpr)**2 + fpr**2))
+                    optimal_threshold = thresholds[optimal_idx]
+                    
+                    print(f"- Suggested optimal threshold based on ROC analysis: {optimal_threshold:.2f}")
+                except Exception as e:
+                    print(f"  ROC analysis error: {e}")
+                    
+                    # Fallback to simple average if ROC analysis fails
+                    if avg_metric_tp != avg_metric_fp:
+                        suggested_threshold = (avg_metric_tp + avg_metric_fp) / 2
+                        print(f"- Suggested threshold based on averages: {suggested_threshold:.2f}")
     
-    # Set title and labels
-    plt.title(f'Rule {rule}: {rule_desc}\n(Pattern: {rule_pattern}, Frequency: {rule_frequency})')
-    plt.xlabel('Entity Order')
-    plt.ylabel(f'Total {metric_field.capitalize()}')
+    return aggregated_data
+==========================================================================================================
+# Function to run the analysis for a specific rule
+def analyze_specific_rule(rule_code):
+    """Run analysis for a specific rule code"""
     
-    # Add legend and adjust plot elements
-    plt.legend(title='Status')
-    plt.grid(True, alpha=0.3)
+    # Load data
+    transaction_data, rule_descriptions = load_data()
     
-    # Adjust layout and save figure
-    plt.tight_layout()
-    plt.savefig(f'rule_threshold_visualizations/rule_{rule}_default.png')
-    plt.close()
+    # Map thresholds to rules
+    rule_thresholds = map_thresholds_to_rules()
     
-    print(f"  Created default rule plot for {rule}")
-===========================================================================================
-# Execute the visualization process
-create_rule_scatter_plots(transaction_data, rule_descriptions, rule_thresholds)
+    # Create output directory
+    os.makedirs('rule_threshold_visualizations', exist_ok=True)
+    
+    # Run visualization for the specific rule
+    result = create_rule_visualization(rule_code, transaction_data, rule_descriptions, rule_thresholds)
+    
+    return result
 
-# Print summary
-print("\nVisualization process complete!")
-print(f"Scatter plots have been created in the 'rule_threshold_visualizations' directory")
+# Example: Analyze TRP_0001
+trp_0001_result = analyze_specific_rule("TRP_0001")
