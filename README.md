@@ -1,25 +1,78 @@
-def create_rule_visualization(rule, transaction_data, rule_descriptions, rule_thresholds):
+# Import necessary libraries
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime, timedelta
+import os
+from sklearn.metrics import roc_curve
+
+# Set visualization style
+plt.style.use('ggplot')
+sns.set(style="whitegrid")
+
+# Create output directory for visualizations
+os.makedirs('rule_threshold_visualizations', exist_ok=True)
+
+# Load and prepare the data
+def load_and_prepare_data():
+    """Load all data from Excel file and join rule information with transaction data"""
+    
+    # Read transaction data
+    transaction_data = pd.read_excel('transaction_dummy_data_10k_final.xlsx', 
+                                     sheet_name='transaction_dummy_data_10k')
+    
+    # Read rule descriptions
+    rule_descriptions = pd.read_excel('transaction_dummy_data_10k_final.xlsx', 
+                                     sheet_name='rule_description')
+    
+    # Convert dates to datetime if not already
+    date_columns = ['transaction_date_time_local', 'created_at', 'closed_at', 
+                    'kyc_sender_create_date', 'kyc_receiver_create_date',
+                    'dob_sender', 'dob_receiver', 'self_closure_date']
+    
+    for col in date_columns:
+        if col in transaction_data.columns:
+            transaction_data[col] = pd.to_datetime(transaction_data[col])
+    
+    # Clean up the rule descriptions and thresholds
+    rule_descriptions['threshold_numeric'] = rule_descriptions['Current threshold'].apply(
+        lambda x: float(str(x).replace('>', '').replace('=', '').strip()) 
+                  if isinstance(x, (str, int, float)) and str(x).replace('>', '').replace('=', '').strip().replace('.', '', 1).isdigit() 
+                  else np.nan
+    )
+    
+    # Join transaction data with rule descriptions
+    merged_data = transaction_data.merge(
+        rule_descriptions[['Rule no.', 'Rule description', 'Current threshold', 'threshold_numeric', 'Rule Pattern']], 
+        left_on='alert_rules', 
+        right_on='Rule no.', 
+        how='left'
+    )
+    
+    print(f"Loaded {len(transaction_data)} transactions and {len(rule_descriptions)} rule descriptions")
+    print(f"Merged data has {len(merged_data)} rows")
+    
+    return merged_data, rule_descriptions
+
+# Function to create visualization for a specific rule
+def create_rule_visualization(rule_code, merged_data):
     """Create a visualization for a specific rule, adapting to its pattern"""
     
-    print(f"\nAnalyzing rule: {rule}")
+    print(f"\nAnalyzing rule: {rule_code}")
     
     # Filter data for this rule
-    rule_data = transaction_data[transaction_data['alert_rules'] == rule].copy()
+    rule_data = merged_data[merged_data['alert_rules'] == rule_code].copy()
     
     if rule_data.empty:
-        print(f"No data found for rule {rule}")
-        return
+        print(f"No data found for rule {rule_code}")
+        return None
     
     # Get rule information
     rule_pattern = rule_data['rule_pattern'].iloc[0] if 'rule_pattern' in rule_data.columns and not rule_data['rule_pattern'].empty else "Unknown"
     rule_frequency = rule_data['rule_frequency'].iloc[0] if 'rule_frequency' in rule_data.columns and not rule_data['rule_frequency'].empty else "Unknown"
-    rule_threshold = rule_thresholds.get(rule, "Unknown")
-    
-    # Get rule description
-    rule_desc = ""
-    rule_desc_row = rule_descriptions[rule_descriptions['Rule no.'] == rule]
-    if not rule_desc_row.empty:
-        rule_desc = rule_desc_row['Rule description'].iloc[0]
+    rule_threshold = rule_data['threshold_numeric'].iloc[0] if 'threshold_numeric' in rule_data.columns and not pd.isna(rule_data['threshold_numeric'].iloc[0]) else None
+    rule_desc = rule_data['Rule description'].iloc[0] if 'Rule description' in rule_data.columns and not rule_data['Rule description'].empty else "Unknown"
     
     print(f"Pattern: {rule_pattern}, Frequency: {rule_frequency}")
     print(f"Threshold: {rule_threshold}")
@@ -28,7 +81,7 @@ def create_rule_visualization(rule, transaction_data, rule_descriptions, rule_th
     # Check closed alerts for TP/FP analysis
     closed_rule_data = rule_data[rule_data['status'].isin(['Closed TP', 'Closed FP'])]
     if closed_rule_data.empty:
-        print(f"No closed alerts (TP/FP) for rule {rule}. Using all data.")
+        print(f"No closed alerts (TP/FP) for rule {rule_code}. Using all data.")
         closed_rule_data = rule_data
     
     # Determine time periods based on rule frequency
@@ -131,7 +184,7 @@ def create_rule_visualization(rule, transaction_data, rule_descriptions, rule_th
     )
     
     # Add threshold line
-    if isinstance(rule_threshold, (int, float)):
+    if rule_threshold is not None and not np.isnan(rule_threshold):
         plt.axhline(y=rule_threshold, color='blue', linestyle='--', label=f'Threshold: {rule_threshold}')
         
         # Add points above threshold text
@@ -160,7 +213,7 @@ def create_rule_visualization(rule, transaction_data, rule_descriptions, rule_th
     )
     
     # Set title and labels
-    plt.title(f'Rule {rule}: {rule_desc}\n(Pattern: {rule_pattern}, Frequency: {rule_frequency})')
+    plt.title(f'Rule {rule_code}: {rule_desc}\n(Pattern: {rule_pattern}, Frequency: {rule_frequency})')
     plt.xlabel(time_period_label)
     plt.ylabel(y_label)
     
@@ -182,10 +235,10 @@ def create_rule_visualization(rule, transaction_data, rule_descriptions, rule_th
     plt.tight_layout()
     
     # Save figure
-    plt.savefig(f'rule_threshold_visualizations/rule_{rule}_analysis.png')
+    plt.savefig(f'rule_threshold_visualizations/rule_{rule_code}_analysis.png')
     plt.close()
     
-    print(f"Analysis complete for rule {rule}. Visualization saved.")
+    print(f"Analysis complete for rule {rule_code}. Visualization saved.")
     
     # Additional insights
     print("\nInsights:")
@@ -198,14 +251,14 @@ def create_rule_visualization(rule, transaction_data, rule_descriptions, rule_th
     print(f"- TP Rate: {tp_rate:.2f}%, FP Rate: {fp_rate:.2f}%")
     
     # Calculate average metric value for TP vs FP
-    avg_metric_tp = aggregated_data[aggregated_data['status'] == 'Closed TP']['metric_value'].mean()
-    avg_metric_fp = aggregated_data[aggregated_data['status'] == 'Closed FP']['metric_value'].mean()
+    avg_metric_tp = aggregated_data[aggregated_data['status'] == 'Closed TP']['metric_value'].mean() if tp_count > 0 else np.nan
+    avg_metric_fp = aggregated_data[aggregated_data['status'] == 'Closed FP']['metric_value'].mean() if fp_count > 0 else np.nan
     
     print(f"- Average {y_label} for TP: {avg_metric_tp:.2f}")
     print(f"- Average {y_label} for FP: {avg_metric_fp:.2f}")
     
     # Calculate threshold effectiveness
-    if isinstance(rule_threshold, (int, float)):
+    if rule_threshold is not None and not np.isnan(rule_threshold):
         false_positives_above = aggregated_data[(aggregated_data['status'] == 'Closed FP') & 
                                              (aggregated_data['metric_value'] > rule_threshold)].shape[0]
         true_positives_below = aggregated_data[(aggregated_data['status'] == 'Closed TP') & 
@@ -217,7 +270,6 @@ def create_rule_visualization(rule, transaction_data, rule_descriptions, rule_th
         # Suggest threshold adjustment if needed
         if false_positives_above > 0 or true_positives_below > 0:
             # Find potential optimal threshold
-            from sklearn.metrics import roc_curve
             
             # Only perform ROC analysis if we have both TP and FP
             if tp_count > 0 and fp_count > 0:
@@ -238,29 +290,26 @@ def create_rule_visualization(rule, transaction_data, rule_descriptions, rule_th
                     print(f"  ROC analysis error: {e}")
                     
                     # Fallback to simple average if ROC analysis fails
-                    if avg_metric_tp != avg_metric_fp:
+                    if not np.isnan(avg_metric_tp) and not np.isnan(avg_metric_fp) and avg_metric_tp != avg_metric_fp:
                         suggested_threshold = (avg_metric_tp + avg_metric_fp) / 2
                         print(f"- Suggested threshold based on averages: {suggested_threshold:.2f}")
     
     return aggregated_data
-==========================================================================================================
-# Function to run the analysis for a specific rule
+
+# Function to analyze a specific rule (e.g., TRP_0001)
 def analyze_specific_rule(rule_code):
     """Run analysis for a specific rule code"""
     
-    # Load data
-    transaction_data, rule_descriptions = load_data()
-    
-    # Map thresholds to rules
-    rule_thresholds = map_thresholds_to_rules()
-    
-    # Create output directory
-    os.makedirs('rule_threshold_visualizations', exist_ok=True)
+    # Load data with joined rule information
+    merged_data, rule_descriptions = load_and_prepare_data()
     
     # Run visualization for the specific rule
-    result = create_rule_visualization(rule_code, transaction_data, rule_descriptions, rule_thresholds)
+    result = create_rule_visualization(rule_code, merged_data)
     
     return result
 
-# Example: Analyze TRP_0001
-trp_0001_result = analyze_specific_rule("TRP_0001")
+# Execute analysis for TRP_0001
+if __name__ == "__main__":
+    print("Starting analysis for TRP_0001...")
+    trp_0001_result = analyze_specific_rule("TRP_0001")
+    print("\nAnalysis complete!")
