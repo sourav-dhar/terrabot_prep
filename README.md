@@ -379,7 +379,7 @@ class AMLSuppressionEngine:
     
     @performance_monitor
     def generate_comprehensive_report(self):
-        """Generate comprehensive suppression report"""
+        """Generate comprehensive suppression report with additional metadata columns"""
         
         if self.suppression_lookup.empty:
             self.logger.warning("No suppressions to report")
@@ -389,6 +389,9 @@ class AMLSuppressionEngine:
         
         report_data = []
         
+        # Define additional metadata columns to aggregate
+        METADATA_COLUMNS = ['alert_region', 'rule_frequency', 'rule_pattern', 'ageing_days', 'min_create_date']
+        
         for _, suppression in self.suppression_lookup.iterrows():
             entity_id = suppression['alert_entity_id']
             
@@ -397,6 +400,9 @@ class AMLSuppressionEngine:
             entity_suppressed_cases = self.suppressed_cases[
                 self.suppressed_cases['alert_entity_id'] == entity_id
             ]
+            
+            # Get all entity cases for metadata aggregation
+            entity_cases = self.cases_df[self.cases_df['alert_entity_id'] == entity_id]
             
             # Extract alert IDs with error handling
             suppressed_alert_ids = []
@@ -412,11 +418,50 @@ class AMLSuppressionEngine:
                 self.logger.error(f"Error extracting alerts for entity {entity_id}: {str(e)}")
                 suppressed_alert_ids = []
             
-            # Calculate metrics
+            # Aggregate metadata columns
+            metadata_aggregations = {}
+            for col in METADATA_COLUMNS:
+                if col in entity_cases.columns:
+                    try:
+                        if col == 'min_create_date':
+                            # For date columns, get the minimum date
+                            valid_dates = pd.to_datetime(entity_cases[col], errors='coerce').dropna()
+                            if len(valid_dates) > 0:
+                                metadata_aggregations[col] = valid_dates.min().strftime('%Y-%m-%d')
+                            else:
+                                metadata_aggregations[col] = None
+                        elif col == 'ageing_days':
+                            # For numeric columns, get statistics
+                            numeric_values = pd.to_numeric(entity_cases[col], errors='coerce').dropna()
+                            if len(numeric_values) > 0:
+                                min_val = numeric_values.min()
+                                max_val = numeric_values.max()
+                                avg_val = numeric_values.mean()
+                                metadata_aggregations[col] = f"Min:{min_val}, Max:{max_val}, Avg:{avg_val:.1f}"
+                            else:
+                                metadata_aggregations[col] = None
+                        else:
+                            # For string columns, get unique values as comma-separated
+                            unique_values = entity_cases[col].dropna().astype(str).unique()
+                            unique_values = [v for v in unique_values if v.lower() not in ['nan', 'none', '']]
+                            if len(unique_values) > 0:
+                                # Limit to prevent overly long strings
+                                if len(unique_values) > 10:
+                                    metadata_aggregations[col] = f"{', '.join(unique_values[:10])} (+{len(unique_values)-10} more)"
+                                else:
+                                    metadata_aggregations[col] = ', '.join(unique_values)
+                            else:
+                                metadata_aggregations[col] = None
+                    except Exception as e:
+                        self.logger.warning(f"Error aggregating {col} for entity {entity_id}: {str(e)}")
+                        metadata_aggregations[col] = None
+                else:
+                    metadata_aggregations[col] = None
+            
+            # Calculate standard metrics
             suppressed_cases_count = len(entity_suppressed_cases)
             total_alerts_suppressed = len(suppressed_alert_ids)
             
-            entity_cases = self.cases_df[self.cases_df['alert_entity_id'] == entity_id]
             total_cases = len(entity_cases)
             closed_fp_cases = len(entity_cases[entity_cases['status'] == 'Closed FP'])
             
@@ -447,6 +492,14 @@ class AMLSuppressionEngine:
                 'new_cases_prevented_count': 0,
                 'analyst_hours_saved': analyst_hours_saved,
                 'false_positive_rate': round(fp_rate, 2),
+                
+                # Add metadata columns
+                'alert_region': metadata_aggregations.get('alert_region'),
+                'rule_frequency': metadata_aggregations.get('rule_frequency'), 
+                'rule_pattern': metadata_aggregations.get('rule_pattern'),
+                'ageing_days': metadata_aggregations.get('ageing_days'),
+                'min_create_date': metadata_aggregations.get('min_create_date'),
+                
                 'manual_override_flag': False,
                 'override_reason': None,
                 'override_date': None,
@@ -461,6 +514,12 @@ class AMLSuppressionEngine:
             
             self.logger.debug(f"Entity {entity_id}: {suppressed_cases_count} cases, "
                             f"{total_alerts_suppressed} alerts, {analyst_hours_saved}h saved")
+            
+            # Log metadata for audit
+            self.logger.debug(f"Entity {entity_id} metadata:")
+            for col, value in metadata_aggregations.items():
+                if value:
+                    self.logger.debug(f"  {col}: {value}")
         
         self.suppression_report = pd.DataFrame(report_data)
         self.logger.info(f"Comprehensive report generated for {len(self.suppression_report)} entities")
@@ -775,12 +834,30 @@ def load_data():
         logger.info(f"Entities: {df['alert_entity_id'].nunique()}")
         logger.info(f"Date range: {df['max_closed_date'].min()} to {df['max_closed_date'].max()}")
         
-        # Check for required columns
+        # Check for required columns (including optional metadata columns)
         required_columns = ['case_id', 'alert_entity_id', 'max_closed_date', 'status', 'closure_reason']
-        missing_columns = [col for col in required_columns if col not in df.columns]
+        optional_columns = ['alert_region', 'rule_frequency', 'rule_pattern', 'ageing_days', 'min_create_date', 'alerts', 'total_alert_counts']
         
-        if missing_columns:
-            raise ValueError(f"Missing required columns: {missing_columns}")
+        missing_required = [col for col in required_columns if col not in df.columns]
+        missing_optional = [col for col in optional_columns if col not in df.columns]
+        
+        if missing_required:
+            raise ValueError(f"Missing required columns: {missing_required}")
+        
+        if missing_optional:
+            logger.warning(f"Missing optional columns (will be handled gracefully): {missing_optional}")
+        
+        # Log available metadata columns
+        available_metadata = [col for col in optional_columns if col in df.columns]
+        if available_metadata:
+            logger.info(f"Available metadata columns: {available_metadata}")
+        
+        # Handle optional date columns
+        date_columns = ['min_create_date']
+        for col in date_columns:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors='coerce')
+                logger.debug(f"Converted {col} to datetime")
         
         # Log data quality issues
         null_counts = df.isnull().sum()
